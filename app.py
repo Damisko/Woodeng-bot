@@ -11,7 +11,7 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 GROUP_IDS = [gid.strip() for gid in os.environ.get("TELEGRAM_GROUP_IDS", "").split(",") if gid.strip()]
 ALL_CHAT_IDS = [CHAT_ID] if CHAT_ID else []
 ALL_CHAT_IDS.extend(GROUP_IDS)
-HELIUS_RPC_URL = os.environ.get("HELIUS_RPC_URL", "YOUR RPC")  # À configurer via env pour sécurité
+HELIUS_RPC_URL = os.environ.get("WOODENG_API_URL", "")  # À configurer via env pour sécurité
 WOODENG_PROGRAM_ID = "8YCde6Jm1Xz8FDiYS3R4AksgNVPEmrjNvkmdMnugEzrV"
 WOODENG_MINT = "83zcTaQRqL1s3PxBRdGVkee9PiGLVP6JXg3oLVF6eAR5"
 PINATA_GATEWAY = "https://gateway.pinata.cloud/ipfs"
@@ -468,3 +468,4 @@ async def main():
 if __name__ == "__main__":
 
     asyncio.run(main())
+
