@@ -1,3 +1,19 @@
+# ================ AJOUT POUR RENDER 24/7 – /health endpoint ================
+from flask import Flask, jsonify
+import os
+from threading import Thread
+import asyncio
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "<h1>Woodeng Tracker 24/7</h1><p>Bot actif – <a href='/health'>/health</a></p>"
+
+@app.route('/health')
+def health():
+    return jsonify({"status": "alive", "bot": "Woodeng Tracker", "uptime": "100%"}), 200
+# ===========================================================================
 import asyncio
 import os
 import aiohttp
@@ -468,3 +484,11 @@ async def main():
 if __name__ == "__main__":
 
     asyncio.run(main())
+
+# ==================== LANCEMENT RENDER (empêche le sleep) ====================
+if __name__ == '__main__':
+    # Ton bot Telegram continue de tourner normalement avec asyncio.run(main())
+    # On ajoute juste Flask en parallèle pour que Render reste réveillé
+    Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000))), daemon=True).start()
+# =============================================================================
+
