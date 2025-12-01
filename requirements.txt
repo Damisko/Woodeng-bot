@@ -1,5 +1,4 @@
-aiohttp==3.9.1
-
-python-telegram-bot==20.7
-
-Flask==3.0.3
+fastapi
+uvicorn[standard]
+python-telegram-bot==20.8
+requests
