@@ -34,205 +34,401 @@ PINATA_GATEWAY = "https://gateway.pinata.cloud/ipfs"
 CHECK_INTERVAL = 4.2
 PORT = int(os.environ.get("PORT", 5000))  # Render utilise $PORT
 # ==================== GLOBAL STATE ====================
-sent_txs = set()
-api_error_count = 0
-token_cache = {}
-tracker_status = {"running": False, "last_alert": None, "total_alerts": 0}
-def format_amount(amount: float) -> str:
-    """Format token amount: decimals if needed, else integer."""
-    if amount % 1 != 0:
-        return f"{amount:.2f}"
-    return str(int(amount))
-def convert_ipfs_to_pinata(uri: str) -> str:
-    """Convert IPFS URI to Pinata gateway URL."""
+# Configure logging
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Configuration
+HELIUS_RPC_URL = os.environ.get("HELIUS_RPC_URL", "").strip()
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_GROUP_IDS = [
+    gid.strip() for gid in os.environ.get("TELEGRAM_GROUP_IDS", "").split(",")
+    if gid.strip()
+]
+
+# Constants
+WOODENG_PROGRAM_ID = "8YCde6Jm1Xz8FDiYS3R4AksgNVPEmrjNvkmdMnugEzrV"
+WOODENG_MINT = "83zcTaQRqL1s3PxBRdGVkee9PiGLVP6JXg3oLVF6eAR5"
+PINATA_GATEWAY = "https://gateway.pinata.cloud/ipfs"
+IPFS_GATEWAYS = [
+    "https://gateway.pinata.cloud/ipfs",
+    "https://ipfs.io/ipfs",
+    "https://cloudflare-ipfs.com/ipfs",
+]
+
+# State tracking
+sent_txs: Set[str] = set()
+token_cache: Dict[str, Dict] = {}
+last_transactions: List[Dict] = []  # Track last 10 transactions
+
+
+def get_chat_ids() -> List[int]:
+    """Get all chat IDs from environment variables"""
+    chat_ids = []
+
+    if TELEGRAM_CHAT_ID and TELEGRAM_CHAT_ID.isdigit():
+        chat_ids.append(int(TELEGRAM_CHAT_ID))
+
+    for gid in TELEGRAM_GROUP_IDS:
+        if gid.isdigit():
+            chat_ids.append(int(gid))
+
+    return chat_ids
+
+
+def convert_ipfs_to_url(uri: str) -> str:
+    """Convert IPFS URI to HTTP gateway URL"""
     if not uri or uri.startswith("http"):
         return uri
     if uri.startswith("ipfs://"):
         return f"{PINATA_GATEWAY}/{uri.replace('ipfs://', '')}"
     return uri
-async def fetch_ipfs_json(uri: str, session: aiohttp.ClientSession) -> dict:
-    """Fetch JSON metadata from IPFS."""
-    if not uri:
-        return {}
-    try:
-        url = convert_ipfs_to_pinata(uri)
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
-            if r.status == 200:
-                return await r.json()
-    except Exception as e:
-        print(f"❌ IPFS fetch failed: {str(e)[:80]}")
+
+
+def fetch_ipfs_json(uri: str) -> dict:
+    """Fetch JSON from IPFS with multiple gateway fallback"""
+    url = convert_ipfs_to_url(uri)
+
+    for gateway in IPFS_GATEWAYS:
+        try:
+            if uri.startswith("ipfs://"):
+                fetch_url = f"{gateway}/{uri.replace('ipfs://', '')}"
+            else:
+                fetch_url = url
+
+            logger.info(f"📡 Fetching IPFS from {gateway}")
+            response = requests.get(fetch_url, timeout=15)
+
+            if response.status_code == 200:
+                logger.info("✅ IPFS fetch successful")
+                return response.json()
+        except Exception as e:
+            logger.warning(f"⚠️ IPFS gateway failed: {e}")
+
     return {}
-async def get_solscan_nft_metadata(mint: str, session: aiohttp.ClientSession) -> dict:
-    """Get NFT metadata from Solscan API as fallback."""
-    try:
-        url = f"https://api.solscan.io/api2/nft/metadata?tokenMint={mint}"
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as r:
-            if r.status == 200 and (data := await r.json()).get("success"):
-                if uri := data.get("data", {}).get("uri"):
-                    return await fetch_ipfs_json(uri, session)
-    except Exception as e:
-        print(f"Solscan API error: {str(e)[:40]}")
-    return {}
-def extract_media_from_metadata(metadata: dict) -> tuple:
-    """Extract image and audio URLs from Metaplex metadata."""
-    image_uri = metadata.get("image")
-    audio_uri = metadata.get("animation_url")
-    image = convert_ipfs_to_pinata(image_uri) if image_uri else None
-    audio = convert_ipfs_to_pinata(audio_uri) if audio_uri else None
-   
-    if not image or not audio:
-        for file in metadata.get("properties", {}).get("files", []):
-            file_type = file.get("type", "").lower()
-            file_uri = file.get("uri", "")
-            if not image and "image" in file_type:
-                image = convert_ipfs_to_pinata(file_uri)
-            if not audio and "audio" in file_type:
-                audio = convert_ipfs_to_pinata(file_uri)
-   
-    return image or None, audio or None
-async def get_token_metadata(mint: str, session: aiohttp.ClientSession) -> dict:
-    """Get token metadata from Helius or Solscan."""
-    if not mint or mint == "Unknown":
-        return {"name": "Unknown", "symbol": "?", "image": None, "audio": None}
-   
+
+
+def get_token_metadata(mint: str) -> dict:
+    """Fetch token metadata from Solana"""
     if mint in token_cache:
         return token_cache[mint]
-   
+
     result = {"name": mint[:8], "symbol": "?", "image": None, "audio": None}
-   
-    # Try Helius getAsset
-    try:
-        payload = {"jsonrpc": "2.0", "id": "1", "method": "getAsset", "params": [mint]}
-        async with session.post(HELIUS_RPC_URL, json=payload, timeout=aiohttp.ClientTimeout(total=5)) as r:
-            if r.status == 200 and (data := await r.json()).get("result"):
-                asset = data["result"]
-                metadata = asset.get("content", {}).get("metadata", {})
-                result["name"] = metadata.get("name", mint[:8])
-                result["symbol"] = metadata.get("symbol", "?")
-               
-                ipfs_data = None
-                if uri := metadata.get("uri"):
-                    print(f"🔗 Fetching URI from Helius: {uri[:50]}...")
-                    ipfs_data = await fetch_ipfs_json(uri, session)
-                    if ipfs_data:
-                        print(f"✅ Got IPFS data: {list(ipfs_data.keys())}")
-                else:
-                    print(f"📡 No URI in Helius, trying Solscan...")
-                    ipfs_data = await get_solscan_nft_metadata(mint, session)
-               
-                if ipfs_data:
-                    img, aud = extract_media_from_metadata(ipfs_data)
-                    print(f"🖼️ Extracted - Image: {img[:40] if img else 'None'}, Audio: {aud[:40] if aud else 'None'}")
-                    result["image"], result["audio"] = img, aud
-                else:
-                    print(f"❌ No IPFS data found for {mint[:8]}")
-               
-                token_cache[mint] = result
-                return result
-    except Exception as e:
-        print(f"Helius error: {str(e)[:80]}")
-   
-    token_cache[mint] = result
-    return result
-async def get_transaction_full(session: aiohttp.ClientSession, tx_sig: str):
-    """Fetch full transaction details from Helius."""
+
+    if not HELIUS_RPC_URL:
+        logger.error("Missing HELIUS_RPC_URL")
+        return result
+
     try:
         payload = {
             "jsonrpc": "2.0",
             "id": "1",
-            "method": "getTransaction",
-            "params": [tx_sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}]
+            "method": "getAsset",
+            "params": [mint]
         }
-        async with session.post(HELIUS_RPC_URL, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            if r.status == 200 and (data := await r.json()).get("result"):
-                return data["result"]
+
+        response = requests.post(HELIUS_RPC_URL, json=payload, timeout=15)
+
+        if response.status_code == 200:
+            data = response.json()
+            asset = data.get("result")
+
+            if asset:
+                content = asset.get("content", {})
+                meta = content.get("metadata", {})
+
+                result["name"] = meta.get("name", mint[:8])
+                result["symbol"] = meta.get("symbol", "?")
+
+                # Try to get metadata URI
+                metadata_uri = content.get("json_uri") or meta.get("uri")
+
+                if metadata_uri:
+                    ipfs_data = fetch_ipfs_json(metadata_uri)
+
+                    if ipfs_data:
+                        if ipfs_data.get("image"):
+                            result["image"] = convert_ipfs_to_url(
+                                ipfs_data["image"])
+                        if ipfs_data.get("animation_url"):
+                            result["audio"] = convert_ipfs_to_url(
+                                ipfs_data["animation_url"])
+
+                token_cache[mint] = result
+                return result
     except Exception as e:
-        print(f"Transaction fetch error: {str(e)[:60]}")
-    return {}
-def _collect_tokens_bought(pre_map: dict, post_map: dict) -> dict:
-    """Extract tokens bought (balance increase, excluding WOODENG)."""
-    tokens_bought = {}
-    for (owner, mint), post_amount in post_map.items():
-        if mint == WOODENG_MINT:
-            continue
-        pre_amount = pre_map.get((owner, mint), 0)
-        delta = post_amount - pre_amount
-        if delta > 0:
-            tokens_bought[mint] = tokens_bought.get(mint, 0) + delta
-    return tokens_bought
-def calculate_token_changes(tx_data: dict) -> dict:
-    """Calculate WOODENG spent and tokens bought. Only count as purchase if WOODENG decreases."""
-    result = {"woodeng_spent": 0, "tokens_bought": {}}
-    if not tx_data:
-        return result
-   
-    try:
-        meta = tx_data.get("meta", {})
-        pre_balances = meta.get("preTokenBalances", [])
-        post_balances = meta.get("postTokenBalances", [])
-       
-        # Map balances by (owner, mint)
-        pre_map = {(b.get("owner"), b.get("mint")): float(b.get("uiTokenAmount", {}).get("uiAmount", 0))
-                   for b in pre_balances if b.get("mint")}
-        post_map = {(b.get("owner"), b.get("mint")): float(b.get("uiTokenAmount", {}).get("uiAmount", 0))
-                    for b in post_balances if b.get("mint")}
-       
-        # Check if WOODENG was spent (purchase indicator)
-        is_purchase = False
-        for (owner, mint), post_amount in post_map.items():
-            pre_amount = pre_map.get((owner, mint), 0)
-            if post_amount < pre_amount and mint == WOODENG_MINT:
-                result["woodeng_spent"] += pre_amount - post_amount
-                is_purchase = True
-       
-        # Only collect tokens bought if WOODENG was spent
-        if is_purchase:
-            result["tokens_bought"] = _collect_tokens_bought(pre_map, post_map)
-       
-        # Fallback: check if WOODENG was completely spent (not detected above)
-        if result["woodeng_spent"] == 0:
-            for (owner, mint), pre_amount in pre_map.items():
-                if mint == WOODENG_MINT and pre_amount > post_map.get((owner, mint), 0):
-                    result["woodeng_spent"] = pre_amount - post_map[(owner, mint)]
-                    result["tokens_bought"] = _collect_tokens_bought(pre_map, post_map)
-                    break
-    except Exception as e:
-        print(f"Calculation error: {str(e)[:40]}")
-   
+        logger.error(f"❌ Error fetching token metadata: {e}")
+
+    token_cache[mint] = result
     return result
-async def send_transaction_alert(bot: Bot, tx_sig: str, tx_data: dict, session: aiohttp.ClientSession):
-    """Send Telegram alert for a transaction."""
-    if tx_sig in sent_txs:
-        return
-    sent_txs.add(tx_sig)
-    if len(sent_txs) > 500:
-        sent_txs.clear()
-   
-    # Get full transaction details
-    tx_details = await get_transaction_full(session, tx_sig)
-    changes = calculate_token_changes(tx_details)
-   
-    # Format transaction info
-    block_time = tx_data.get("blockTime", "Unknown")
-    timestamp = datetime.fromtimestamp(block_time).strftime("%Y-%m-%d %H:%M:%S") if isinstance(block_time, int) else "Unknown"
-    status = "✅ Success" if tx_data.get("err") is None else "❌ Failed"
-   
-    # Format WOODENG amount
-    woodeng_text = format_amount(changes["woodeng_spent"]) if changes["woodeng_spent"] > 0 else "Unknown"
-   
-    # Get token info and first media
-    token_lines = []
-    first_image = None
-    first_audio = None
-   
-    for mint, amount in changes["tokens_bought"].items():
-        metadata = await get_token_metadata(mint, session)
-        token_lines.append(f"*{metadata['name']}* ({metadata['symbol']}): {format_amount(amount)}")
-       
-        if not first_image and metadata.get("image"):
-            first_image = metadata["image"]
-        if not first_audio and metadata.get("audio"):
-            first_audio = metadata["audio"]
+
+
+def calculate_token_changes(tx_data: dict) -> dict:
+    """Calculate token changes in a transaction"""
+    result = {"woodeng_spent": 0, "tokens_bought": {}}
+
+    if not tx_data or not tx_data.get("meta"):
+        return result
+
+    try:
+        meta = tx_data["meta"]
+        pre_balances = {}
+        post_balances = {}
+
+        for balance in meta.get("preTokenBalances", []):
+            key = f"{balance['owner']}-{balance['mint']}"
+            pre_balances[key] = float(
+                balance.get("uiTokenAmount", {}).get("uiAmount") or 0)
+
+        for balance in meta.get("postTokenBalances", []):
+            key = f"{balance['owner']}-{balance['mint']}"
+            post_balances[key] = float(
+                balance.get("uiTokenAmount", {}).get("uiAmount") or 0)
+
+        for key, pre_amt in pre_balances.items():
+            post_amt = post_balances.get(key, 0)
+            _, mint = key.split("-")
+
+            if mint == WOODENG_MINT and pre_amt > post_amt:
+                result["woodeng_spent"] += pre_amt - post_amt
+            elif post_amt > pre_amt and mint != WOODENG_MINT:
+                result["tokens_bought"][mint] = result["tokens_bought"].get(
+                    mint, 0) + (post_amt - pre_amt)
+    except Exception as e:
+        logger.error(f"Error calculating token changes: {e}")
+
+    return result
+
+
+async def send_telegram_alert(bot: Bot,
+                              chat_id: int,
+                              tx_sig: str,
+                              token_name: str,
+                              woodeng_spent: float,
+                              image_url: str = None,
+                              audio_url: str = None):
+    """Send Telegram alert for purchase"""
+    caption = f"🚀 *PURCHASE DETECTED*\n\n*{escape_markdown(token_name)}*\n💰 WOODENG spent: {format_amount(woodeng_spent)}\n\n🔗 [View on Solscan](https://solscan.io/tx/{tx_sig})\n\n📝 TX: `{tx_sig}`"
+
+    reply_markup = {
+        "inline_keyboard":
+        [[{
+            "text": "🔍 View Transaction on Solscan",
+            "url": f"https://solscan.io/tx/{tx_sig}"
+        }],
+         [{
+             "text":
+             "💎 Buy WOODENG",
+             "url":
+             "https://raydium.io/swap/?outputMint=83zcTaQRqL1s3PxBRdGVkee9PiGLVP6JXg3oLVF6eAR5"
+         }, {
+             "text": "🎵 Buy Sound Meme",
+             "url": "https://woodengsol.com/sound-memes"
+         }]]
+    }
+
+    try:
+        if image_url:
+            await bot.send_photo(chat_id=chat_id,
+                                 photo=image_url,
+                                 caption=caption,
+                                 parse_mode=ParseMode.MARKDOWN,
+                                 reply_markup=reply_markup)
+            logger.info(f"✅ Photo sent to {chat_id}")
+
+            if audio_url:
+                await bot.send_audio(chat_id=chat_id,
+                                     audio=audio_url,
+                                     title=token_name)
+                logger.info(f"✅ Audio sent to {chat_id}")
+        else:
+            await bot.send_message(chat_id=chat_id,
+                                   text=caption,
+                                   parse_mode=ParseMode.MARKDOWN,
+                                   reply_markup=reply_markup,
+                                   disable_web_page_preview=True)
+            logger.info(f"✅ Message sent to {chat_id}")
+    except Exception as e:
+        logger.error(f"❌ Error sending alert to {chat_id}: {e}")
+
+
+def escape_markdown(text: str) -> str:
+    """Escape special characters for Markdown"""
+    special_chars = "_*[]()~`>#+-=|{}.!"
+    for char in special_chars:
+        text = text.replace(char, f"\\{char}")
+    return text
+
+
+def format_amount(amount: float) -> str:
+    """Format amount with thousands separator"""
+    return f"{amount:,.2f}"
+
+
+def fetch_recent_transactions(limit: int = 5) -> List[dict]:
+    """Fetch recent transactions from WOODENG program"""
+    if not HELIUS_RPC_URL:
+        logger.error("Missing HELIUS_RPC_URL")
+        return []
+
+    try:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "getSignaturesForAddress",
+            "params": [WOODENG_PROGRAM_ID, {
+                "limit": 20
+            }]
+        }
+
+        response = requests.post(HELIUS_RPC_URL, json=payload, timeout=15)
+
+        if response.status_code == 200:
+            data = response.json()
+            signatures = data.get("result", [])
+            logger.info(f"📝 Found {len(signatures)} signatures")
+
+            purchases = []
+
+            for sig_data in signatures[:limit]:
+                sig = sig_data["signature"]
+
+                try:
+                    tx_payload = {
+                        "jsonrpc":
+                        "2.0",
+                        "id":
+                        "1",
+                        "method":
+                        "getTransaction",
+                        "params": [
+                            sig, {
+                                "encoding": "jsonParsed",
+                                "maxSupportedTransactionVersion": 0
+                            }
+                        ]
+                    }
+
+                    tx_response = requests.post(HELIUS_RPC_URL,
+                                                json=tx_payload,
+                                                timeout=15)
+
+                    if tx_response.status_code == 200:
+                        tx_data = tx_response.json()
+                        tx_result = tx_data.get("result")
+
+                        if tx_result:
+                            changes = calculate_token_changes(tx_result)
+
+                            if changes["woodeng_spent"] > 0:
+                                purchases.append({
+                                    "signature":
+                                    sig,
+                                    "woodengSpent":
+                                    changes["woodeng_spent"],
+                                    "tokensBought":
+                                    changes["tokens_bought"]
+                                })
+                                logger.info(
+                                    f"✅ Found purchase: {sig[:16]}... ({changes['woodeng_spent']:.2f} WOODENG)"
+                                )
+                except Exception as e:
+                    logger.warning(
+                        f"Error processing transaction {sig[:16]}...: {e}")
+
+            return purchases
+    except Exception as e:
+        logger.error(f"❌ Error fetching transactions: {e}")
+
+    return []
+
+
+def get_last_transactions() -> List[dict]:
+    """Get last 10 tracked transactions"""
+    return last_transactions[-10:]
+
+
+async def track_woodeng():
+    """Main tracker function"""
+    logger.info("🚀 WOODENG Tracker Starting")
+
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("❌ Missing TELEGRAM_BOT_TOKEN")
+        return False
+
+    chat_ids = get_chat_ids()
+    if not chat_ids:
+        logger.error("❌ No chat IDs configured")
+        return False
+
+    try:
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+
+        # Send startup message
+        await bot.send_message(
+            chat_id=chat_ids[0],
+            text="🚀 Woodeng Tracker started – let the purchases begin")
+        logger.info("✅ Startup message sent")
+    except Exception as e:
+        logger.error(f"❌ Error sending startup message: {e}")
+
+    # Fetch transactions
+    logger.info("📊 Fetching transactions...")
+    transactions = fetch_recent_transactions(limit=10)
+
+    if not transactions:
+        logger.info("📝 No purchase transactions found")
+        return True
+
+    logger.info(f"📬 Processing {len(transactions)} purchases...")
+
+    # Process each transaction
+    for tx in transactions:
+        if tx["signature"] in sent_txs:
+            logger.info(
+                f"⏭️ Skipping already sent transaction: {tx['signature'][:16]}..."
+            )
+            continue
+
+        sent_txs.add(tx["signature"])
+        # Track in last_transactions
+        if len(last_transactions) >= 10:
+            last_transactions.pop(0)
+        last_transactions.append(tx)
+
+        # Get first token mint
+        first_mint = next(iter(tx["tokensBought"].keys()),
+                          None) if tx["tokensBought"] else None
+
+        if not first_mint:
+            logger.warning(
+                f"⚠️ No tokens bought in transaction {tx['signature'][:16]}..."
+            )
+            continue
+
+        logger.info(f"📦 Fetching metadata for {first_mint[:8]}...")
+        metadata = get_token_metadata(first_mint)
+
+        token_name = metadata.get("name", "Sound Meme")
+        image_url = metadata.get("image")
+        audio_url = metadata.get("audio")
+
+        logger.info(f"📝 Sending alerts for {token_name}...")
+
+        # Send to all chat IDs
+        for chat_id in chat_ids:
+            await send_telegram_alert(bot, chat_id, tx["signature"],
+                                      token_name, tx["woodengSpent"],
+                                      image_url, audio_url)
+
+    logger.info("✅ Monitoring cycle complete")
+    return True
+
+
+if __name__ == "__main__":
+    asyncio.run(track_woodeng())
    
     # Build message
     token_text = "\n".join(token_lines) if token_lines else "N/A"
@@ -491,3 +687,4 @@ if __name__ == '__main__':
     # On ajoute juste Flask en parallèle pour que Render reste réveillé
     Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000))), daemon=True).start()
 # =============================================================================
+
