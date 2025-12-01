@@ -27,12 +27,12 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 GROUP_IDS = [gid.strip() for gid in os.environ.get("TELEGRAM_GROUP_IDS", "").split(",") if gid.strip()]
 ALL_CHAT_IDS = [CHAT_ID] if CHAT_ID else []
 ALL_CHAT_IDS.extend(GROUP_IDS)
-HELIUS_RPC_URL = os.environ.get("HELIUS_RPC_URL", "")
+HELIUS_RPC_URL = os.environ.get("WOODENG_API_URL", "")  # À configurer via env pour sécurité
 WOODENG_PROGRAM_ID = "8YCde6Jm1Xz8FDiYS3R4AksgNVPEmrjNvkmdMnugEzrV"
 WOODENG_MINT = "83zcTaQRqL1s3PxBRdGVkee9PiGLVP6JXg3oLVF6eAR5"
 PINATA_GATEWAY = "https://gateway.pinata.cloud/ipfs"
 CHECK_INTERVAL = 4.2
-PORT = int(os.environ.get("PORT", 5000))
+PORT = int(os.environ.get("PORT", 5000))  # Render utilise $PORT
 # ==================== GLOBAL STATE ====================
 sent_txs = set()
 api_error_count = 0
@@ -50,38 +50,17 @@ def convert_ipfs_to_pinata(uri: str) -> str:
     if uri.startswith("ipfs://"):
         return f"{PINATA_GATEWAY}/{uri.replace('ipfs://', '')}"
     return uri
-def convert_ipfs_to_viewer(uri: str) -> str:
-    """Convert IPFS URI to IPFS Viewer gateway URL."""
-    if not uri or uri.startswith("http"):
-        return uri
-    if uri.startswith("ipfs://"):
-        import urllib.parse
-        encoded = urllib.parse.quote(uri)
-        return f"https://ipfsviewer.com/?hash={encoded}"
-    return uri
 async def fetch_ipfs_json(uri: str, session: aiohttp.ClientSession) -> dict:
-    """Fetch JSON metadata from IPFS - tries Pinata then IPFS Viewer."""
+    """Fetch JSON metadata from IPFS."""
     if not uri:
         return {}
     try:
-        # Try Pinata first
         url = convert_ipfs_to_pinata(uri)
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
             if r.status == 200:
                 return await r.json()
     except Exception as e:
-        print(f"⚠️ Pinata IPFS fetch failed: {str(e)[:60]}")
-    
-    try:
-        # Fallback to IPFS Viewer
-        url = convert_ipfs_to_viewer(uri)
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
-            if r.status == 200:
-                return await r.json()
-    except Exception as e:
-        print(f"⚠️ IPFS Viewer fetch failed: {str(e)[:60]}")
-    
-    print(f"❌ All IPFS fetch methods failed for: {uri[:50]}")
+        print(f"❌ IPFS fetch failed: {str(e)[:80]}")
     return {}
 async def get_solscan_nft_metadata(mint: str, session: aiohttp.ClientSession) -> dict:
     """Get NFT metadata from Solscan API as fallback."""
@@ -95,47 +74,20 @@ async def get_solscan_nft_metadata(mint: str, session: aiohttp.ClientSession) ->
         print(f"Solscan API error: {str(e)[:40]}")
     return {}
 def extract_media_from_metadata(metadata: dict) -> tuple:
-    """Extract image and audio URLs from Metaplex metadata - prioritizes Pinata then IPFS Viewer."""
+    """Extract image and audio URLs from Metaplex metadata."""
     image_uri = metadata.get("image")
     audio_uri = metadata.get("animation_url")
-    
-    # Try Pinata first, then IPFS Viewer as fallback
-    image = None
-    audio = None
-    
-    if image_uri:
-        if image_uri.startswith("ipfs://"):
-            image = convert_ipfs_to_pinata(image_uri)  # Pinata primary
-            print(f"🖼️ Image URL (Pinata): {image[:60]}")
-        else:
-            image = image_uri
-    
-    if audio_uri:
-        if audio_uri.startswith("ipfs://"):
-            audio = convert_ipfs_to_pinata(audio_uri)  # Pinata primary
-            print(f"🔊 Audio URL (Pinata): {audio[:60]}")
-        else:
-            audio = audio_uri
+    image = convert_ipfs_to_pinata(image_uri) if image_uri else None
+    audio = convert_ipfs_to_pinata(audio_uri) if audio_uri else None
    
-    # Try properties files as fallback
     if not image or not audio:
         for file in metadata.get("properties", {}).get("files", []):
             file_type = file.get("type", "").lower()
             file_uri = file.get("uri", "")
-            
             if not image and "image" in file_type:
-                if file_uri.startswith("ipfs://"):
-                    image = convert_ipfs_to_pinata(file_uri)
-                else:
-                    image = file_uri
-                print(f"🖼️ Image from properties (Pinata): {image[:60]}")
-            
+                image = convert_ipfs_to_pinata(file_uri)
             if not audio and "audio" in file_type:
-                if file_uri.startswith("ipfs://"):
-                    audio = convert_ipfs_to_pinata(file_uri)
-                else:
-                    audio = file_uri
-                print(f"🔊 Audio from properties (Pinata): {audio[:60]}")
+                audio = convert_ipfs_to_pinata(file_uri)
    
     return image or None, audio or None
 async def get_token_metadata(mint: str, session: aiohttp.ClientSession) -> dict:
@@ -460,12 +412,12 @@ async def handle_telegram_commands(bot: Bot, session: aiohttp.ClientSession):
             await asyncio.sleep(5)
 async def start_http_server():
     """Start mini HTTP server on PORT."""
-    app_http = web.Application()
-    app_http.router.add_get("/", dashboard_handler)
-    app_http.router.add_get("/health", health_handler)
-    app_http.router.add_get("/stats", stats_handler)
+    app = web.Application()
+    app.router.add_get("/", dashboard_handler)
+    app.router.add_get("/health", health_handler)
+    app.router.add_get("/stats", stats_handler)
    
-    runner = web.AppRunner(app_http)
+    runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
