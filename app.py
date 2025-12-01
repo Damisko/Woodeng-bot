@@ -43,92 +43,98 @@ def format_amount(amount: float) -> str:
     if amount % 1 != 0:
         return f"{amount:.2f}"
     return str(int(amount))
-def convert_ipfs_to_url(uri: str) -> str:
-    """Convert IPFS URI to HTTP gateway URL"""
+def convert_ipfs_to_pinata(uri: str) -> str:
+    """Convert IPFS URI to Pinata gateway URL."""
     if not uri or uri.startswith("http"):
         return uri
     if uri.startswith("ipfs://"):
         return f"{PINATA_GATEWAY}/{uri.replace('ipfs://', '')}"
     return uri
-
-
-def fetch_ipfs_json(uri: str) -> dict:
-    """Fetch JSON from IPFS with multiple gateway fallback"""
-    url = convert_ipfs_to_url(uri)
-    
-    for gateway in IPFS_GATEWAYS:
-        try:
-            if uri.startswith("ipfs://"):
-                fetch_url = f"{gateway}/{uri.replace('ipfs://', '')}"
-            else:
-                fetch_url = url
-            
-            logger.info(f"📡 Fetching IPFS from {gateway}")
-            response = requests.get(fetch_url, timeout=15)
-            
-            if response.status_code == 200:
-                logger.info("✅ IPFS fetch successful")
-                return response.json()
-        except Exception as e:
-            logger.warning(f"⚠️ IPFS gateway failed: {e}")
-    
+async def fetch_ipfs_json(uri: str, session: aiohttp.ClientSession) -> dict:
+    """Fetch JSON metadata from IPFS."""
+    if not uri:
+        return {}
+    try:
+        url = convert_ipfs_to_pinata(uri)
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+            if r.status == 200:
+                return await r.json()
+    except Exception as e:
+        print(f"❌ IPFS fetch failed: {str(e)[:80]}")
     return {}
-
-
-def get_token_metadata(mint: str) -> dict:
-    """Fetch token metadata from Solana"""
+async def get_solscan_nft_metadata(mint: str, session: aiohttp.ClientSession) -> dict:
+    """Get NFT metadata from Solscan API as fallback."""
+    try:
+        url = f"https://api.solscan.io/api2/nft/metadata?tokenMint={mint}"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as r:
+            if r.status == 200 and (data := await r.json()).get("success"):
+                if uri := data.get("data", {}).get("uri"):
+                    return await fetch_ipfs_json(uri, session)
+    except Exception as e:
+        print(f"Solscan API error: {str(e)[:40]}")
+    return {}
+def extract_media_from_metadata(metadata: dict) -> tuple:
+    """Extract image and audio URLs from Metaplex metadata."""
+    image_uri = metadata.get("image")
+    audio_uri = metadata.get("animation_url")
+    image = convert_ipfs_to_pinata(image_uri) if image_uri else None
+    audio = convert_ipfs_to_pinata(audio_uri) if audio_uri else None
+   
+    if not image or not audio:
+        for file in metadata.get("properties", {}).get("files", []):
+            file_type = file.get("type", "").lower()
+            file_uri = file.get("uri", "")
+            if not image and "image" in file_type:
+                image = convert_ipfs_to_pinata(file_uri)
+            if not audio and "audio" in file_type:
+                audio = convert_ipfs_to_pinata(file_uri)
+   
+    return image or None, audio or None
+async def get_token_metadata(mint: str, session: aiohttp.ClientSession) -> dict:
+    """Get token metadata from Helius or Solscan."""
+    if not mint or mint == "Unknown":
+        return {"name": "Unknown", "symbol": "?", "image": None, "audio": None}
+   
     if mint in token_cache:
         return token_cache[mint]
-    
-    result: Dict[str, Any] = {
-        "name": mint[:8],
-        "symbol": "?",
-        "image": None,
-        "audio": None
-    }
-    
-    if not HELIUS_RPC_URL:
-        logger.error("Missing HELIUS_RPC_URL")
-        return result
-    
+   
+    result = {"name": mint[:8], "symbol": "?", "image": None, "audio": None}
+   
+    # Try Helius getAsset
     try:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": "1",
-            "method": "getAsset",
-            "params": [mint]
-        }
-        
-        response = requests.post(HELIUS_RPC_URL, json=payload, timeout=15)
-        
-        if response.status_code == 200:
-            data = response.json()
-            asset = data.get("result")
-            
-            if asset:
-                content = asset.get("content", {})
-                meta = content.get("metadata", {})
-                
-                result["name"] = meta.get("name", mint[:8])
-                result["symbol"] = meta.get("symbol", "?")
-                
-                # Try to get metadata URI
-                metadata_uri = content.get("json_uri") or meta.get("uri")
-                
-                if metadata_uri:
-                    ipfs_data = fetch_ipfs_json(metadata_uri)
-                    
+        payload = {"jsonrpc": "2.0", "id": "1", "method": "getAsset", "params": [mint]}
+        async with session.post(HELIUS_RPC_URL, json=payload, timeout=aiohttp.ClientTimeout(total=5)) as r:
+            if r.status == 200 and (data := await r.json()).get("result"):
+                asset = data["result"]
+                metadata = asset.get("content", {}).get("metadata", {})
+                result["name"] = metadata.get("name", mint[:8])
+                result["symbol"] = metadata.get("symbol", "?")
+               
+                ipfs_data = None
+                if uri := metadata.get("uri"):
+                    print(f"🔗 Fetching URI from Helius: {uri[:50]}...")
+                    ipfs_data = await fetch_ipfs_json(uri, session)
                     if ipfs_data:
-                        if ipfs_data.get("image"):
-                            result["image"] = convert_ipfs_to_url(
-                                ipfs_data["image"])
-                        if ipfs_data.get("animation_url"):
-                            result["audio"] = convert_ipfs_to_url(
-                                ipfs_data["animation_url"])
+                        print(f"✅ Got IPFS data: {list(ipfs_data.keys())}")
+                else:
+                    print(f"📡 No URI in Helius, trying Solscan...")
+                    ipfs_data = await get_solscan_nft_metadata(mint, session)
+               
+                if ipfs_data:
+                    img, aud = extract_media_from_metadata(ipfs_data)
+                    print(f"🖼️ Extracted - Image: {img[:40] if img else 'None'}, Audio: {aud[:40] if aud else 'None'}")
+                    result["image"], result["audio"] = img, aud
+                else:
+                    print(f"❌ No IPFS data found for {mint[:8]}")
+               
+                token_cache[mint] = result
+                return result
+    except Exception as e:
+        print(f"Helius error: {str(e)[:80]}")
    
-    
-   
-
+    token_cache[mint] = result
+    return result
+async def get_transaction_full(session: aiohttp.ClientSession, tx_sig: str):
     """Fetch full transaction details from Helius."""
     try:
         payload = {
@@ -485,6 +491,3 @@ if __name__ == '__main__':
     # On ajoute juste Flask en parallèle pour que Render reste réveillé
     Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000))), daemon=True).start()
 # =============================================================================
-
-
-
