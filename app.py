@@ -126,7 +126,7 @@ def get_token_metadata(mint: str) -> dict:
                             result["audio"] = convert_ipfs_to_url(
                                 ipfs_data["animation_url"])
    
-    token_cache[mint] = result
+    
     return result
 async def get_transaction_full(session: aiohttp.ClientSession, tx_sig: str):
     """Fetch full transaction details from Helius."""
@@ -485,3 +485,4 @@ if __name__ == '__main__':
     # On ajoute juste Flask en parallèle pour que Render reste réveillé
     Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000))), daemon=True).start()
 # =============================================================================
+
