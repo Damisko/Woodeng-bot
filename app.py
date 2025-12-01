@@ -12,13 +12,14 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "<h1>Woodeng BUY-ONLY Tracker</h1><p>Que les achats – <a href='/health'>/health</a></p>"
+    return "<h1>Woodeng BUY-ONLY Tracker</h1><p>Images + Audio 100% – <a href='/health'>/health</a></p>"
 
 @app.route('/health')
 def health():
-    return jsonify({"status": "alive", "}), 200
+    return jsonify({"status": "alive", "bot": "Woodeng BUY-ONLY"}), 200
 # ======================================================================
 
+# ==================== CONFIGURATION ====================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TON_TOKEN_ICI")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "TON_CHAT_ID_ICI")
 ALL_CHAT_IDS = [int(x.strip()) for x in CHAT_ID.split(",") if x.strip().isdigit()]
@@ -26,11 +27,13 @@ ALL_CHAT_IDS = [int(x.strip()) for x in CHAT_ID.split(",") if x.strip().isdigit(
 HELIUS_RPC = os.environ.get("WOODENG_API_URL", "https://mainnet.helius-rpc.com/?api-key=")
 PROGRAM_ID = "8YCde6Jm1Xz8FDiYS3R4AksgNVPEmrjNvkmdMnugEzrV"
 WOODENG_MINT = "83zcTaQRqL1s3PxBRdGVkee9PiGLVP6JXg3oLVF6eAR5"
+# ======================================================================
 
 sent_txs = set()
 
 def ipfs_to_https(url):
-    if not url: return None
+    if not url:
+        return None
     if url.startswith("ipfs://"):
         return "https://gateway.pinata.cloud/ipfs/" + url[7:]
     return url
@@ -38,15 +41,18 @@ def ipfs_to_https(url):
 async def get_media(mint, session):
     try:
         async with session.post(HELIUS_RPC, json={"jsonrpc":"2.0","id":1,"method":"getAsset","params":[mint]}) as r:
-            if r.status != 200: return {}
+            if r.status != 200:
+                return {"name": mint[:8], "image": None, "audio": None}
             data = await r.json()
             asset = data.get("result", {})
             uri = asset.get("content", {}).get("metadata", {}).get("uri")
-            if not uri: return {}
+            if not uri:
+                return {"name": mint[:8], "image": None, "audio": None}
 
             json_url = ipfs_to_https(uri)
             async with session.get(json_url) as r2:
-                if r2.status != 200: return {}
+                if r2.status != 200:
+                    return {"name": mint[:8], "image": None, "audio": None}
                 meta = await r2.json()
 
             name = meta.get("name", mint[:8])
@@ -65,7 +71,8 @@ async def is_real_buy(tx):
         for k, pre_amt in pre.items():
             if k[1] == WOODENG_MINT and pre_amt > post.get(k, 0):
                 return True
-    except: pass
+    except:
+        pass
     return False
 
 async def send_alert(bot, sig, session):
@@ -94,9 +101,11 @@ async def send_alert(bot, sig, session):
                 spent += pre_amt - post.get(k, 0)
             elif post.get(k, 0) > pre_amt and not first_mint:
                 first_mint = k[1]
-    except: pass
+    except:
+        pass
 
-    if spent <= 0 or not first_mint: return
+    if spent <= 0 or not first_mint:
+        return
 
     media = await get_media(first_mint, session)
     img_url = media.get("image")
@@ -138,7 +147,7 @@ async def tracker():
         print("CHAT_ID manquant")
         return
     bot = Bot(TELEGRAM_TOKEN)
-    await bot.send_message(ALL_CHAT_IDS[0], "Woodeng BUY-ONLY ON – images + audio 100%")
+    await bot.send_message(ALL_CHAT_IDS[0], "Woodeng BUY-ONLY Tracker ON – images + audio 100%")
 
     async with aiohttp.ClientSession() as s:
         last = None
@@ -158,7 +167,7 @@ async def tracker():
                 print("Erreur:", e)
             await asyncio.sleep(3.8)
 
-# ==================== LANCEMENT RENDER ====================
+# ==================== LANCEMENT RENDER 24/7 ====================
 if __name__ == '__main__':
     Thread(target=lambda: asyncio.run(tracker()), daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
