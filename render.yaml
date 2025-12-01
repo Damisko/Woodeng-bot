@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: woodeng-tracker
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      HELIUS_RPC_URL:
+        description: Your Helius RPC URL (https://...)
+      TELEGRAM_BOT_TOKEN:
+        description: Your Telegram bot token
+      TELEGRAM_CHAT_ID:
+        description: Your chat ID (or group)
+      TELEGRAM_GROUP_IDS:
+        description: Comma-separated group IDs (optional)
+      TRACK_INTERVAL_SECONDS:
+        value: "60"
