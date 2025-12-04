@@ -491,3 +491,4 @@ if __name__ == '__main__':
     # On ajoute juste Flask en parallèle pour que Render reste réveillé
     Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000))), daemon=True).start()
 # =============================================================================
+
